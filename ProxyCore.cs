@@ -55,15 +55,20 @@ namespace ProxyServer
             string[] parts = Http.Split(new[] { "\r\n" }, StringSplitOptions.None);
             if (parts.Length == 0) return;
 
-            string[] partparts = parts[0].Split(' ');
-            string method = partparts[0];
-            string fullURL = partparts[1];
-            string versionHTTP = partparts[2];
+            string[] requestParts = parts[0].Split(' ', 3);
+            if (requestParts.Length < 3)
+            {
+                await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 400 Bad Request\r\n\r\n"));
+                return;
+            }
+
+            string method = requestParts[0];
+            string fullURL = requestParts[1];
+            string versionHTTP = requestParts[2];
 
             Dictionary<string, string> headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             int headerEnd = 1;
-
             for (int i = 1; i < parts.Length; i++)
             {
                 if (string.IsNullOrWhiteSpace(parts[i]))
@@ -81,10 +86,7 @@ namespace ProxyServer
                 }
             }
 
-            string host = null;
-            if (headers.ContainsKey("Host")) host = headers["Host"];
-
-            if (host == null)
+            if (!headers.TryGetValue("Host", out string host) || string.IsNullOrWhiteSpace(host))
             {
                 await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 400 Bad Request\r\n\r\n"));
                 return;
@@ -93,84 +95,86 @@ namespace ProxyServer
             string targetHost = host;
             int targetPort = 80;
 
-            if (host.Contains(":"))
+            if (host.Contains(":") && !host.StartsWith("["))
             {
-                string[] partss = host.Split(':');
-                targetHost = partss[0];
-                int.TryParse(partss[1], out targetPort);
+                string[] hp = host.Split(':', 2);
+                targetHost = hp[0];
+                if (!int.TryParse(hp[1], out targetPort))
+                    targetPort = 80;
+            }
+
+            string path = "/";
+            string hostForBlacklist = targetHost;
+
+            if (Uri.TryCreate(fullURL, UriKind.Absolute, out Uri absUri))
+            {
+                path = string.IsNullOrEmpty(absUri.PathAndQuery) ? "/" : absUri.PathAndQuery;
+                hostForBlacklist = absUri.Host;
+
+                if (!absUri.IsDefaultPort)
+                    targetPort = absUri.Port;
+            }
+            else
+            {
+                path = fullURL.StartsWith("/") ? fullURL : "/" + fullURL;
             }
 
             try
             {
-                string addrForBlackList = "/";
-
-                try
+                if (CheckBlackList(hostForBlacklist))
                 {
-                    addrForBlackList = new Uri(fullURL).Host;
-
-                    if (CheckBlackList(addrForBlackList))
-                    {
-                        string message = "Blocked";
-                        string response = $"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {Encoding.UTF8.GetByteCount(message)}\r\n\r\n{message}";
-                        await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes(response));
-                        BrowserToProxy.Shutdown(SocketShutdown.Both);
-                        BrowserToProxy.Close();
-                        Console.WriteLine($"{addrForBlackList} заблокирован");
-                        return;
-                    }
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine(e.Message);
+                    string message = "Blocked";
+                    string response =
+                        $"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {Encoding.UTF8.GetByteCount(message)}\r\nConnection: close\r\n\r\n{message}";
+                    await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes(response));
+                    BrowserToProxy.Shutdown(SocketShutdown.Both);
+                    BrowserToProxy.Close();
+                    Console.WriteLine($"{hostForBlacklist} заблокирован");
+                    return;
                 }
 
                 using (Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                 {
                     var addresses = await Dns.GetHostAddressesAsync(targetHost);
                     var ipv4Addresses = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToArray();
+
                     if (ipv4Addresses.Length == 0)
                     {
-                        await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+                        await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"));
                         return;
                     }
-                    var targetIP = ipv4Addresses[0];
-                    IPEndPoint remIP = new IPEndPoint(targetIP, targetPort);
+
+                    IPEndPoint remIP = new IPEndPoint(ipv4Addresses[0], targetPort);
                     await server.ConnectAsync(remIP);
-                    string path = "/";
 
-                    try { path = new Uri(fullURL).PathAndQuery; }
-                    catch { }
+                    var request = new StringBuilder();
+                    request.Append($"{method} {path} {versionHTTP}\r\n");
 
-                    string newRequest = $"{method} {path} {versionHTTP}\r\n";
+                    foreach (var kv in headers)
+                    {
+                        if (kv.Key.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
+                            kv.Key.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase) ||
+                            kv.Key.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
+                            kv.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
 
-                    for (int i = 1; i < headerEnd; i++) newRequest += parts[i] + "\r\n";
+                        request.Append($"{kv.Key}: {kv.Value}\r\n");
+                    }
 
-                    newRequest += "\r\n";
-                    byte[] requestBytes = Encoding.ASCII.GetBytes(newRequest);
+                    request.Append("Connection: close\r\n");
+                    request.Append("\r\n");
+
+                    byte[] requestBytes = Encoding.ASCII.GetBytes(request.ToString());
                     await server.SendAsync(requestBytes);
 
                     byte[] buffer = new byte[16384];
                     int bytesRead;
-                    bool firstChunk = true;
-                    string statusLine = "";
 
                     while ((bytesRead = await server.ReceiveAsync(buffer)) > 0)
                     {
                         await BrowserToProxy.SendAsync(new ArraySegment<byte>(buffer, 0, bytesRead));
-
-                        if (firstChunk)
-                        {
-                            string responseText = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                            string[] responseLines = responseText.Split(new[] { "\r\n" }, StringSplitOptions.None);
-
-                            if (responseLines.Length > 0)
-                            {
-                                statusLine = responseLines[0];
-                                Console.WriteLine($"{fullURL} {statusLine}");
-                            }
-
-                            firstChunk = false;
-                        }
                     }
                 }
             }
@@ -180,8 +184,7 @@ namespace ProxyServer
 
                 if (BrowserToProxy.Connected)
                 {
-                    await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
-
+                    await BrowserToProxy.SendAsync(Encoding.ASCII.GetBytes("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"));
                     BrowserToProxy.Shutdown(SocketShutdown.Both);
                     BrowserToProxy.Close();
                 }
