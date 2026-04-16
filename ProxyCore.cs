@@ -52,6 +52,7 @@ namespace ProxyServer
 
         public async Task HandleConnectionHTTPAsync(Socket BrowserToProxy, string Http)
         {
+            // Обработка заголовка с браузера
             string[] parts = Http.Split(new[] { "\r\n" }, StringSplitOptions.None);
             if (parts.Length == 0) return;
 
@@ -135,6 +136,7 @@ namespace ProxyServer
 
                 using (Socket server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                 {
+                    // Сбор информации и отправка с прокси на сервер
                     var addresses = await Dns.GetHostAddressesAsync(targetHost);
                     var ipv4Addresses = addresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToArray();
 
@@ -152,14 +154,6 @@ namespace ProxyServer
 
                     foreach (var kv in headers)
                     {
-                        if (kv.Key.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
-                            kv.Key.Equals("Proxy-Connection", StringComparison.OrdinalIgnoreCase) ||
-                            kv.Key.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
-                            kv.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
-
                         request.Append($"{kv.Key}: {kv.Value}\r\n");
                     }
 
@@ -169,6 +163,7 @@ namespace ProxyServer
                     byte[] requestBytes = Encoding.ASCII.GetBytes(request.ToString());
                     await server.SendAsync(requestBytes);
 
+                    // Получение с сервера и отправка в браузер
                     byte[] buffer = new byte[16384];
                     int bytesRead;
 
@@ -184,7 +179,7 @@ namespace ProxyServer
                             if (lineEnd > 0)
                             {
                                 string statusLine = responseText.Substring(0, lineEnd);
-                                Console.WriteLine($"{method} {path} -> {statusLine}");
+                                Console.WriteLine($"{fullURL} {statusLine}");
                             }
 
                             firstChunk = false;
