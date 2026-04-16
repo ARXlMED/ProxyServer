@@ -7,10 +7,6 @@ http://bru.by/news
 ip.addr == 127.0.0.2
 ip.addr == 127.0.0.2 && http
 
-http && !tls 
-
-http contains "Host: example.com" && !tls 
-http contains "Host: live.legendy.by" && !tls 
-http contains "Host: bru.by" && !tls 
+ip.addr == yourip && http
 
 Не забудь если что чистить историю браузера

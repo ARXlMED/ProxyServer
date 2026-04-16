@@ -95,7 +95,7 @@ namespace ProxyServer
             string targetHost = host;
             int targetPort = 80;
 
-            if (host.Contains(":") && !host.StartsWith("["))
+            if (host.Contains(":"))
             {
                 string[] hp = host.Split(':', 2);
                 targetHost = hp[0];
@@ -172,8 +172,24 @@ namespace ProxyServer
                     byte[] buffer = new byte[16384];
                     int bytesRead;
 
+                    bool firstChunk = true;
+
                     while ((bytesRead = await server.ReceiveAsync(buffer)) > 0)
                     {
+                        if (firstChunk)
+                        {
+                            string responseText = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                            int lineEnd = responseText.IndexOf("\r\n");
+
+                            if (lineEnd > 0)
+                            {
+                                string statusLine = responseText.Substring(0, lineEnd);
+                                Console.WriteLine($"{method} {path} -> {statusLine}");
+                            }
+
+                            firstChunk = false;
+                        }
+
                         await BrowserToProxy.SendAsync(new ArraySegment<byte>(buffer, 0, bytesRead));
                     }
                 }
